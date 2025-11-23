@@ -1,0 +1,5 @@
+{
+  "name": "GrammarHub",
+  "description": "A GitHub-styled tool for teachers to upload audio, transcribe dialogues, and extract grammatical learning points using Gemini 2.5 Flash.",
+  "requestFramePermissions": []
+}
