@@ -1,3 +1,4 @@
+
 export interface GrammarPoint {
   title: string;
   explanation: string;
@@ -21,7 +22,9 @@ export interface AppSettings {
 export enum AppState {
   IDLE = 'IDLE',
   UPLOADING = 'UPLOADING',
-  ANALYZING = 'ANALYZING',
+  TRANSCRIBING = 'TRANSCRIBING', // New: Specific state for speech-to-text
+  TRANSCRIPTION_REVIEW = 'TRANSCRIPTION_REVIEW', // New: Intermediate step
+  ANALYZING = 'ANALYZING', // Renamed: Specifically for grammar analysis
   SUCCESS = 'SUCCESS',
   ERROR = 'ERROR'
 }
