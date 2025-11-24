@@ -1,40 +1,33 @@
+
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Header } from './components/Header';
 import { ConfigModal } from './components/ConfigModal';
 import { AnalysisView } from './components/AnalysisView';
+import { TranscriptionView } from './components/TranscriptionView';
 import { AppSettings, AppState, AnalysisResult } from './types';
 import { ALLOWED_AUDIO_TYPES, MAX_FILE_SIZE_MB } from './constants';
 import { fileToBase64, formatBytes } from './utils/fileHelpers';
-import { analyzeAudio } from './services/geminiService';
+import { transcribeAudio, analyzeGrammar } from './services/geminiService';
 import { uploadAudioFile, saveAnalysisRecord } from './services/supabaseService';
-import { UploadCloud, Loader2, FileAudio, AlertCircle } from 'lucide-react';
+import { UploadCloud, Loader2, FileAudio, AlertCircle, FileText } from 'lucide-react';
 
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
   const [configModalOpen, setConfigModalOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [configWarning, setConfigWarning] = useState<string | null>(null);
+  
+  // Data State
+  const [currentFile, setCurrentFile] = useState<{file: File, storagePath: string} | null>(null);
+  const [transcriptionText, setTranscriptionText] = useState<string>("");
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   
-  // Load config from localStorage on initial render
+  // Load config from localStorage
   const [settings, setSettings] = useState<AppSettings>(() => {
     try {
       const saved = localStorage.getItem('grammarhub_settings');
       if (saved) return JSON.parse(saved);
-      
-      // Try legacy key if exists
-      const legacy = localStorage.getItem('grammarhub_supabase_config');
-      if (legacy) {
-         const legObj = JSON.parse(legacy);
-         return { ...legObj, geminiApiKey: '' };
-      }
-      
-      return {
-        url: '',
-        anonKey: '',
-        bucketName: 'audio-uploads',
-        geminiApiKey: ''
-      };
+      return { url: '', anonKey: '', bucketName: 'audio-uploads', geminiApiKey: '' };
     } catch (e) {
       return { url: '', anonKey: '', bucketName: 'audio-uploads', geminiApiKey: '' };
     }
@@ -53,10 +46,11 @@ const App: React.FC = () => {
     const file = event.target.files?.[0];
     if (!file) return;
     event.target.value = '';
-    await processFile(file);
+    await startProcess(file);
   };
 
-  const processFile = async (file: File) => {
+  // STEP 1: Upload and Transcribe
+  const startProcess = async (file: File) => {
     setErrorMsg(null);
     setConfigWarning(null);
 
@@ -70,7 +64,6 @@ const App: React.FC = () => {
       return;
     }
 
-    // Check configuration strictly
     if (!settings.url || !settings.anonKey || !settings.geminiApiKey) {
         setConfigWarning("Please configure Supabase details AND Gemini API Key to continue.");
         setConfigModalOpen(true);
@@ -87,37 +80,67 @@ const App: React.FC = () => {
         if (path) storagePath = path;
       } catch (e: any) {
         console.error("Upload failed", e);
-        
         let friendlyError = e.message || "Unknown error";
         if (friendlyError.includes("violate") || friendlyError.includes("policy")) {
-          friendlyError = `Permission denied: ${friendlyError}. Check your Storage RLS Policies.`;
-        } else if (friendlyError.includes("bucket")) {
-           friendlyError = `Bucket error: ${friendlyError}. Does bucket '${settings.bucketName}' exist?`;
+          friendlyError = `Permission denied: Check Supabase RLS Policies.`;
         }
-
         setErrorMsg(`Upload failed: ${friendlyError}`);
         setAppState(AppState.IDLE);
         return;
       }
 
-      // 2. Analyze with Gemini
-      setAppState(AppState.ANALYZING);
+      // Save file info temporarily
+      setCurrentFile({ file, storagePath });
+
+      // 2. Transcribe with Gemini
+      setAppState(AppState.TRANSCRIBING);
       const base64Audio = await fileToBase64(file);
-      
-      // Pass the API Key from settings
-      const result = await analyzeAudio(base64Audio, file.type, settings.geminiApiKey);
+      const text = await transcribeAudio(base64Audio, file.type, settings.geminiApiKey);
 
-      // 3. Save metadata to Supabase
-      await saveAnalysisRecord(file.name, storagePath, result, settings);
-
-      setAnalysisResult(result);
-      setAppState(AppState.SUCCESS);
+      setTranscriptionText(text);
+      setAppState(AppState.TRANSCRIPTION_REVIEW);
 
     } catch (e) {
       console.error(e);
       setAppState(AppState.ERROR);
       setErrorMsg(e instanceof Error ? e.message : "An unexpected error occurred.");
     }
+  };
+
+  // STEP 2: Analyze Grammar (triggered by user from TranscriptionView)
+  const handleProceedToAnalysis = async (finalText: string) => {
+    if (!currentFile) return;
+
+    try {
+      setAppState(AppState.ANALYZING);
+
+      // 3. Extract Grammar
+      const grammarData = await analyzeGrammar(finalText, settings.geminiApiKey);
+
+      // Construct final result
+      const fullResult: AnalysisResult = {
+        transcription: finalText,
+        ...grammarData
+      };
+
+      // 4. Save Record to Supabase (Only now do we save the data)
+      await saveAnalysisRecord(currentFile.file.name, currentFile.storagePath, fullResult, settings);
+
+      setAnalysisResult(fullResult);
+      setAppState(AppState.SUCCESS);
+
+    } catch (e) {
+      console.error(e);
+      setAppState(AppState.ERROR);
+      setErrorMsg(e instanceof Error ? e.message : "Analysis failed.");
+    }
+  };
+
+  const resetApp = () => {
+    setAppState(AppState.IDLE);
+    setAnalysisResult(null);
+    setTranscriptionText("");
+    setCurrentFile(null);
   };
 
   const renderContent = () => {
@@ -132,7 +155,7 @@ const App: React.FC = () => {
               </div>
               <h2 className="text-xl font-semibold text-gray-900 mb-2">Upload Classroom Audio</h2>
               <p className="text-gray-500 mb-8 text-sm">
-                Upload an MP3, WAV or M4A file. We'll transcribe it and extract grammar points.
+                Upload an MP3, WAV or M4A file. First we transcribe it, then you can analyze it.
               </p>
               
               <input
@@ -153,9 +176,9 @@ const App: React.FC = () => {
               <div className="mt-6 flex justify-center gap-6 text-xs text-gray-400">
                 <span>Max {MAX_FILE_SIZE_MB}MB</span>
                 <span>•</span>
-                <span>Secure Supabase Storage</span>
+                <span>Step 1: Transcribe</span>
                 <span>•</span>
-                <span>Powered by Gemini 2.5</span>
+                <span>Step 2: Analyze</span>
               </div>
 
               {errorMsg && (
@@ -177,9 +200,28 @@ const App: React.FC = () => {
             <div className="animate-bounce mb-4">
               <UploadCloud className="w-12 h-12 text-blue-500" />
             </div>
-            <h3 className="text-lg font-medium text-gray-700">Uploading to Supabase...</h3>
-            <p className="text-gray-500 text-sm mt-2">Saving file to your storage bucket.</p>
+            <h3 className="text-lg font-medium text-gray-700">Uploading to Storage...</h3>
           </div>
+        );
+
+      case AppState.TRANSCRIBING:
+        return (
+          <div className="flex flex-col items-center justify-center mt-32">
+            <div className="animate-spin mb-4">
+              <Loader2 className="w-12 h-12 text-indigo-500" />
+            </div>
+            <h3 className="text-lg font-medium text-gray-700">Transcribing Audio...</h3>
+            <p className="text-gray-500 text-sm mt-2">Converting speech to text</p>
+          </div>
+        );
+
+      case AppState.TRANSCRIPTION_REVIEW:
+        return (
+          <TranscriptionView 
+            transcription={transcriptionText} 
+            onAnalyze={handleProceedToAnalysis}
+            onCancel={resetApp}
+          />
         );
 
       case AppState.ANALYZING:
@@ -188,11 +230,11 @@ const App: React.FC = () => {
             <div className="animate-spin mb-4">
               <Loader2 className="w-12 h-12 text-purple-600" />
             </div>
-            <h3 className="text-lg font-medium text-gray-700">Analyzing Conversation...</h3>
-            <p className="text-gray-500 text-sm mt-2">Gemini is transcribing and identifying grammar points.</p>
+            <h3 className="text-lg font-medium text-gray-700">Extracting Grammar Points...</h3>
+            <p className="text-gray-500 text-sm mt-2">Gemini is analyzing the text syntax and context.</p>
             <div className="mt-6 bg-white border border-gray-200 rounded px-4 py-2 flex items-center gap-2 text-sm text-gray-600">
-               <FileAudio className="w-4 h-4" />
-               <span>Model: gemini-2.5-flash</span>
+               <FileText className="w-4 h-4" />
+               <span>Processing text analysis</span>
             </div>
           </div>
         );
@@ -201,10 +243,7 @@ const App: React.FC = () => {
         return analysisResult ? (
           <AnalysisView 
             result={analysisResult} 
-            onReset={() => {
-              setAppState(AppState.IDLE);
-              setAnalysisResult(null);
-            }} 
+            onReset={resetApp} 
           />
         ) : null;
     }
