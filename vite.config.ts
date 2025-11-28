@@ -5,6 +5,8 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   // IMPORTANT: Replace 'grammar-hub' with your actual GitHub repository name
-  // If your repo is https://github.com/user/my-tool, this should be '/my-tool/'
   base: '/GrammarHub/', 
+  worker: {
+    format: 'es',
+  }
 })
