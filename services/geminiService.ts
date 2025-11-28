@@ -1,4 +1,3 @@
-
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { AnalysisResult } from "../types";
 
@@ -27,46 +26,8 @@ const grammarSchema: Schema = {
   required: ["summary", "grammarPoints"],
 };
 
-// STEP 1: Transcribe Audio Only
-export const transcribeAudio = async (base64Audio: string, mimeType: string, apiKey: string): Promise<string> => {
-  if (!apiKey) throw new Error("Gemini API Key is missing.");
-
-  const ai = new GoogleGenAI({ apiKey: apiKey });
-
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: mimeType,
-              data: base64Audio,
-            },
-          },
-          {
-            text: `Please transcribe the following audio file verbatim. 
-            - Return ONLY the transcription text. 
-            - Do not add any introduction, markdown formatting, or timestamps.
-            - If there are multiple speakers, format it naturally like a script.`
-          },
-        ],
-      },
-    });
-
-    if (response.text) {
-      return response.text.trim();
-    } else {
-      throw new Error("No transcription received from Gemini.");
-    }
-  } catch (error: any) {
-    console.error("Transcription Error:", error);
-    if (error instanceof TypeError && error.message.includes("fetch")) {
-      throw new Error("Network Error: Unable to connect to Google API. Please check your VPN/Proxy.");
-    }
-    throw error;
-  }
-};
+// NOTE: Transcription is now handled locally by Whisper in worker.ts to save tokens.
+// Only Grammar Analysis uses Gemini.
 
 // STEP 2: Analyze Grammar from Text
 export const analyzeGrammar = async (transcription: string, apiKey: string): Promise<Omit<AnalysisResult, 'transcription'>> => {
@@ -100,7 +61,6 @@ export const analyzeGrammar = async (transcription: string, apiKey: string): Pro
     });
 
     if (response.text) {
-      // The schema returns summary and grammarPoints. We combine this with the transcription in the App layer.
       return JSON.parse(response.text);
     } else {
       throw new Error("No analysis received from Gemini.");
@@ -108,7 +68,10 @@ export const analyzeGrammar = async (transcription: string, apiKey: string): Pro
   } catch (error: any) {
     console.error("Grammar Analysis Error:", error);
     if (error instanceof TypeError && error.message.includes("fetch")) {
-      throw new Error("Network Error: Unable to connect to Google API.");
+      throw new Error("Network Error: Unable to connect to Google API. Please check your VPN/Proxy.");
+    }
+    if (error.status === 429 || (error.message && error.message.includes("429"))) {
+      throw new Error("Gemini Quota Exceeded (429). Please create a NEW API Key in a new Google Cloud Project to reset your free tier limit.");
     }
     throw error;
   }
